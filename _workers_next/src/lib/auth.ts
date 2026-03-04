@@ -1,5 +1,8 @@
 import NextAuth from "next-auth"
 import GitHub from "next-auth/providers/github"
+import { sql } from "drizzle-orm"
+import { db } from "@/lib/db"
+import { loginUsers } from "@/lib/db/schema"
 
 const githubClientId = process.env.GITHUB_ID || process.env.AUTH_GITHUB_ID
 const githubClientSecret = process.env.GITHUB_SECRET || process.env.AUTH_GITHUB_SECRET
@@ -55,16 +58,37 @@ const providers: any[] = [
     }
 ]
 
+async function resolveExistingGitHubUserIdByUsername(username?: string | null) {
+    if (!username) return null
+    const normalizedUsername = username.trim().toLowerCase()
+    if (!normalizedUsername.startsWith("gh_")) return null
+
+    try {
+        const rows = await db
+            .select({ userId: loginUsers.userId })
+            .from(loginUsers)
+            .where(sql`LOWER(${loginUsers.username}) = ${normalizedUsername}`)
+            .orderBy(sql`COALESCE(${loginUsers.lastLoginAt}, 0) DESC`)
+            .limit(1)
+        return rows[0]?.userId ?? null
+    } catch {
+        return null
+    }
+}
+
 if (githubClientId && githubClientSecret) {
     providers.push(
         GitHub({
             clientId: githubClientId,
             clientSecret: githubClientSecret,
             profile(profile) {
-                const login = typeof profile.login === "string" ? profile.login : String(profile.id)
+                const rawLogin = typeof profile.login === "string" && profile.login.trim().length > 0
+                    ? profile.login
+                    : String(profile.id)
+                const login = rawLogin.toLowerCase()
                 return {
                     id: `github:${String(profile.id)}`,
-                    name: profile.name || login,
+                    name: profile.name || rawLogin,
                     email: profile.email,
                     image: profile.avatar_url,
                     // Prefix GitHub usernames to avoid collisions with Linux DO usernames.
@@ -83,8 +107,28 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     callbacks: {
         async jwt({ token, user, profile, account }) {
             if (user) {
-                token.id = String(user.id)
-                if (user.username) token.username = user.username
+                let resolvedId = String(user.id)
+                let resolvedUsername = user.username ? String(user.username) : null
+
+                if (account?.provider === "github") {
+                    if (resolvedUsername) {
+                        resolvedUsername = resolvedUsername.toLowerCase()
+                    }
+
+                    // Prefer providerAccountId for GitHub; it's the most stable account identifier.
+                    if (account.providerAccountId) {
+                        resolvedId = `github:${account.providerAccountId}`
+                    }
+
+                    // If this GitHub username already exists in login_users, keep using that user_id.
+                    const existingUserId = await resolveExistingGitHubUserIdByUsername(resolvedUsername)
+                    if (existingUserId) {
+                        resolvedId = existingUserId
+                    }
+                }
+
+                token.id = resolvedId
+                if (resolvedUsername) token.username = resolvedUsername
                 if (user.trustLevel !== undefined) token.trustLevel = user.trustLevel
                 if (user.avatar_url) token.avatar_url = user.avatar_url
                 else if (user.image) token.avatar_url = user.image
