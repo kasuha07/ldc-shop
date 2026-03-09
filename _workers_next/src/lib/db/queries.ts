@@ -876,9 +876,10 @@ function groupProductsAsVariants<T extends {
     sortOrder: number | null;
     createdAt: Date | null;
 }>(rows: T[]): (T & { variantCount?: number; priceMin?: number; priceMax?: number })[] {
-    const byGroup = new Map<string | null, T[]>();
+    const byGroup = new Map<string, T[]>();
     for (const row of rows) {
-        const key = (row.variantGroupId && row.variantGroupId.trim()) || null;
+        const rawKey = (row.variantGroupId && row.variantGroupId.trim()) || null;
+        const key = rawKey ?? row.id;
         const list = byGroup.get(key) ?? [];
         list.push(row);
         byGroup.set(key, list);
